@@ -1,0 +1,1601 @@
+# technical-challenge-mansi-kapoor — full source export
+
+Directory structure:
+
+.gitignore
+README.md
+returns_desk_refund_system/__init__.py
+returns_desk_refund_system/decisions.py
+returns_desk_refund_system/exceptions.py
+returns_desk_refund_system/models.py
+returns_desk_refund_system/readme.md
+returns_desk_refund_system/reasons.py
+returns_desk_refund_system/refund_policy.py
+returns_desk_refund_system/request_processor.py
+returns_desk_refund_system/requirements.txt
+returns_desk_refund_system/service.py
+returns_desk_refund_system/status.py
+returns_desk_refund_system/tests/__init__.py
+returns_desk_refund_system/tests/test_refund_policy.py
+returns_desk_refund_system/tests/test_request_processor.py
+returns_desk_refund_system/tests/test_service.py
+
+
+================================================================================
+FILE: .gitignore
+================================================================================
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.venv/
+venv/
+
+================================================================================
+FILE: README.md
+================================================================================
+# Shopify Interview
+## Technical Challenge
+
+### Setup
+- Clone your repository to your local machine
+  - `git clone git@github.com:ShopifyInterviews/technical-challenge-<firstname>-<lastname>.git`
+- Create a new branch to complete the challenge:
+  - `git checkout -b <challenge-name>`
+- Write the code to complete the challenge in the language of your choice
+- Commit your code that you've written
+  - `git add .`
+  - `git commit -m 'challenge complete'`
+- Push your code to your repository
+  - `git push -u origin <challenge-name>`
+
+================================================================================
+FILE: returns_desk_refund_system/__init__.py
+================================================================================
+"""Returns Desk Refund System.
+
+Public API surface for the package.
+"""
+
+from .decisions import REFUND_DECISIONS
+from .exceptions import (
+    InvalidReturnItemsError,
+    InvalidReturnReasonError,
+    InvalidStatusTransitionError,
+    MissingRequiredFieldError,
+    OrderNotFoundError,
+    ReturnDeskError,
+    ReturnNotFoundError,
+)
+from .models import Order, OrderItem, RefundDecision, ReturnLineItem, ReturnRequest
+from .reasons import RETURN_REASONS
+from .refund_policy import (
+    DamagedItemsAutoRefundRule,
+    DefaultManualReviewRule,
+    RefundDecisionEngine,
+    RefundRule,
+)
+from .request_processor import (
+    DEFAULT_DAILY_AUTO_REFUND_CAP,
+    ERROR_RESULT,
+    REQUIRED_FIELDS,
+    normalize_email,
+    process_return_requests,
+)
+from .service import ReturnDeskService
+from .status import RETURN_STATUSES, VALID_TRANSITIONS
+
+__all__ = [
+    "ReturnDeskService",
+    "Order",
+    "OrderItem",
+    "ReturnLineItem",
+    "ReturnRequest",
+    "RefundDecision",
+    "RETURN_STATUSES",
+    "VALID_TRANSITIONS",
+    "RETURN_REASONS",
+    "REFUND_DECISIONS",
+    "RefundRule",
+    "RefundDecisionEngine",
+    "DamagedItemsAutoRefundRule",
+    "DefaultManualReviewRule",
+    "process_return_requests",
+    "REQUIRED_FIELDS",
+    "ERROR_RESULT",
+    "DEFAULT_DAILY_AUTO_REFUND_CAP",
+    "normalize_email",
+    "ReturnDeskError",
+    "OrderNotFoundError",
+    "InvalidReturnItemsError",
+    "InvalidReturnReasonError",
+    "ReturnNotFoundError",
+    "InvalidStatusTransitionError",
+    "MissingRequiredFieldError",
+]
+
+================================================================================
+FILE: returns_desk_refund_system/decisions.py
+================================================================================
+"""Enumerated refund decision outcomes."""
+
+REFUND_DECISIONS = {
+    "AUTO_REFUND": "AUTO_REFUND",
+    "MANUAL_REVIEW": "MANUAL_REVIEW",
+}
+
+================================================================================
+FILE: returns_desk_refund_system/exceptions.py
+================================================================================
+"""Domain-specific exceptions for the Returns Desk service."""
+
+
+class ReturnDeskError(Exception):
+    """Base class for all Returns Desk errors."""
+
+
+class OrderNotFoundError(ReturnDeskError):
+    """Raised when a return is submitted against an order that doesn't exist."""
+
+
+class InvalidReturnItemsError(ReturnDeskError):
+    """Raised when requested return items aren't part of the order, or exceed
+    the quantity available to return."""
+
+
+class InvalidReturnReasonError(ReturnDeskError):
+    """Raised when a return is submitted with a reason outside of
+    reasons.RETURN_REASONS."""
+
+
+class ReturnNotFoundError(ReturnDeskError):
+    """Raised when an operation references a return_id that doesn't exist."""
+
+
+class InvalidStatusTransitionError(ReturnDeskError):
+    """Raised when a return is moved to a status it cannot legally reach from
+    its current status (see status.VALID_TRANSITIONS)."""
+
+
+class MissingRequiredFieldError(ReturnDeskError):
+    """Raised when a raw return request tuple is missing a required field
+    (see request_processor.REQUIRED_FIELDS and requirements.txt, section 7)."""
+
+================================================================================
+FILE: returns_desk_refund_system/models.py
+================================================================================
+"""Typed data models for orders and return requests.
+
+Kept separate from the service so parsing/representation can evolve
+independently of the decision/workflow logic (per requirements.txt).
+"""
+
+from dataclasses import dataclass, field
+from decimal import Decimal
+from typing import Dict, List, Optional
+
+
+
+@dataclass(frozen=True)
+class OrderItem:
+    """A single line item that was purchased on an order."""
+
+    item_id: str
+    sku: str
+    quantity: int
+    unit_price: Decimal
+
+
+@dataclass(frozen=True)
+class Order:
+    """An existing order that a customer may request a return against."""
+
+    order_id: str
+    buyer_email: str
+    items: List[OrderItem]
+
+    def find_item(self, item_id: str) -> Optional[OrderItem]:
+        return next((item for item in self.items if item.item_id == item_id), None)
+
+
+@dataclass
+class ReturnLineItem:
+    """A quantity of a specific order item being requested for return."""
+
+    item_id: str
+    quantity: int
+
+
+@dataclass
+class RefundDecision:
+    """The outcome of running a return request through the refund policy."""
+
+    decision: str  # "AUTO_REFUND" or "MANUAL_REVIEW"
+    refund_amount: Decimal
+
+
+@dataclass
+class ReturnRequest:
+    """A return request moving through the Returns Desk workflow."""
+
+    return_id: str
+    order_id: str
+    items: List[ReturnLineItem]
+    actor: str
+    status: str
+    reason: str
+    decision: Optional[RefundDecision] = None
+    history: List[Dict] = field(default_factory=list)
+
+================================================================================
+FILE: returns_desk_refund_system/readme.md
+================================================================================
+#Summary: 
+Create an extensible library that processes return requests to determine the immediate refund amount and whether to AUTO_REFUND or send to MANUAL_REVIEW, designed to evolve as requirements grow.
+
+# Returns Desk Refund System
+
+# Problem Statement
+
+Shopify operates a Returns Desk tool that helps support staff decide whether an order should be auto-refunded or routed for manual review.
+
+Each "return request" event represents a buyer asking for a refund on an order.
+
+Your job is to implement a small library that processes return requests and provides a decision for each request:
+
+1. The refund amount that should be issued right now (may be `0.00`)
+2. The decision (`"AUTO_REFUND"` or `"MANUAL_REVIEW"`)
+
+We'll start with a simplified system and gradually add requirements. Try to design your code so it can be extended and refactored as the requirements evolve.
+
+---
+
+## Input Format
+
+Each return request is a tuple:
+
+```python
+(request_id, order_id, buyer_email, shipping_address_id, payment_fingerprint, order_total, reason)
+```
+
+| Field | Description |
+|-------|-------------|
+| `request_id` | Unique identifier |
+| `order_id` | Unique for this exercise |
+| `buyer_email` | A string (may differ by casing/whitespace) |
+| `shipping_address_id` | A string (already normalized) |
+| `payment_fingerprint` | A tokenized string (already normalized) |
+| `order_total` | A decimal number |
+| `reason` | An enum string: `"DAMAGED"`, `"NOT_RECEIVED"`, `"CHANGED_MIND"` |
+
+Your program will receive a list of return requests and must output, for each request:
+
+```python
+(request_id, refund_amount, decision)
+```
+
+---
+
+## Stage 1 — Basic Refund Rule (Single-Request Logic)
+
+For now, every request is evaluated independently.
+
+### Policy
+
+- If `reason == "DAMAGED"`: auto-refund the full `order_total`
+- Otherwise: do not refund automatically; route to manual review
+
+### Sample Input
+
+```python
+requests = [
+  ("r1", "o100", "Alice@Example.com ", "addr_1", "card_A", 120.00, "DAMAGED"),
+  ("r2", "o101", "bob@example.com",    "addr_2", "card_B",  80.00, "CHANGED_MIND"),
+  ("r3", "o102", "cathy@example.com",  "addr_3", "card_C",  35.50, "DAMAGED"),
+]
+```
+
+### Expected Output
+
+```python
+[
+  ("r1", 120.00, "AUTO_REFUND"),
+  ("r2",   0.00, "MANUAL_REVIEW"),
+  ("r3",  35.50, "AUTO_REFUND"),
+]
+```
+
+---
+
+## Stage 2 — Email Normalization + Per-Buyer Daily Cap
+
+We now want to limit accidental abuse and reduce operational risk.
+
+### Policy
+
+- Minor changes (casing, whitespaces, dots, etc.) are considered the same email
+- A buyer can receive at most **$200** of auto-refunds per day (across all their requests)
+- Once the cap is reached, we refund as much as we can and trigger a `"MANUAL_REVIEW"`
+- Additional eligible refunds have `refund_amount = 0.00`
+
+> **Note:** Assume all sample data is from the same day.
+
+### Sample Input
+
+```python
+requests = [
+  ("r1", "o200", "Alice@Example.com ", "addr_1", "card_A", 120.00, "DAMAGED"),
+  ("r2", "o201", "alice@example.com",  "addr_4", "card_D",  90.00, "DAMAGED"),
+  ("r3", "o202", "alice@example.com",  "addr_5", "card_E",  50.00, "DAMAGED"),
+]
+```
+
+### Expected Output (cap is $200)
+
+```python
+[
+  ("r1", 120.00, "AUTO_REFUND"),      # total auto-refunds for alice: 120
+  ("r2",  80.00, "MANUAL_REVIEW"),    # only 80 left before hitting cap (200)
+  ("r3",   0.00, "MANUAL_REVIEW"),    # cap reached
+]
+```
+
+---
+
+================================================================================
+FILE: returns_desk_refund_system/reasons.py
+================================================================================
+"""Enumerated valid reasons a buyer may give for a return request."""
+
+RETURN_REASONS = {
+    "DAMAGED": "DAMAGED",
+    "NOT_RECEIVED": "NOT_RECEIVED",
+    "CHANGED_MIND": "CHANGED_MIND",
+}
+
+================================================================================
+FILE: returns_desk_refund_system/refund_policy.py
+================================================================================
+"""Refund decision policy for return requests.
+
+Stage 1 policy (see readme.md):
+    - reason == DAMAGED: auto-refund the value of the items being returned.
+    - otherwise: no immediate refund, route to manual review.
+
+Implemented as a small ordered rule chain (rather than one if/else) so new
+reasons, thresholds, or cross-request signals can be layered in later
+without rewriting existing rules — per the extensibility requirement in
+requirements.txt.
+"""
+
+from abc import ABC, abstractmethod
+from decimal import Decimal
+from typing import List, Optional
+
+from .decisions import REFUND_DECISIONS
+from .models import Order, RefundDecision, ReturnRequest
+from .reasons import RETURN_REASONS
+
+
+class RefundRule(ABC):
+    """A single rule that may decide a return's refund outcome.
+
+    Return None to defer to the next rule in the chain.
+    """
+
+    @abstractmethod
+    def evaluate(self, return_request: ReturnRequest, order: Order) -> Optional[RefundDecision]:
+        raise NotImplementedError
+
+
+class DamagedItemsAutoRefundRule(RefundRule):
+    """Auto-refund the value of the returned items when reason is DAMAGED."""
+
+    def evaluate(self, return_request: ReturnRequest, order: Order) -> Optional[RefundDecision]:
+        if return_request.reason != RETURN_REASONS["DAMAGED"]:
+            return None
+
+        refund_amount = self._returned_items_value(return_request, order)
+        return RefundDecision(
+            decision=REFUND_DECISIONS["AUTO_REFUND"], refund_amount=refund_amount
+        )
+
+    @staticmethod
+    def _returned_items_value(return_request: ReturnRequest, order: Order) -> Decimal:
+        total = Decimal("0.00")
+        for line_item in return_request.items:
+            order_item = order.find_item(line_item.item_id)
+            if order_item is not None:
+                total += order_item.unit_price * line_item.quantity
+        return total
+
+
+class DefaultManualReviewRule(RefundRule):
+    """Fallback rule: route to manual review with no immediate refund."""
+
+    def evaluate(self, return_request: ReturnRequest, order: Order) -> Optional[RefundDecision]:
+        return RefundDecision(
+            decision=REFUND_DECISIONS["MANUAL_REVIEW"], refund_amount=Decimal("0.00")
+        )
+
+
+class RefundDecisionEngine:
+    """Runs an ordered chain of rules and returns the first decision reached.
+
+    Rules are checked in order; the first one to return a non-None
+    RefundDecision wins. A custom rule list can be supplied to
+    override/extend the default Stage 1 policy.
+    """
+
+    def __init__(self, rules: Optional[List[RefundRule]] = None):
+        self._rules: List[RefundRule] = (
+            rules
+            if rules is not None
+            else [DamagedItemsAutoRefundRule(), DefaultManualReviewRule()]
+        )
+
+    def decide(self, return_request: ReturnRequest, order: Order) -> RefundDecision:
+        for rule in self._rules:
+            decision = rule.evaluate(return_request, order)
+            if decision is not None:
+                return decision
+        return RefundDecision(
+            decision=REFUND_DECISIONS["MANUAL_REVIEW"], refund_amount=Decimal("0.00")
+        )
+
+================================================================================
+FILE: returns_desk_refund_system/request_processor.py
+================================================================================
+"""Stateless batch entry point matching the tuple contract from readme.md
+and the edge cases captured in requirements.txt (section 7).
+
+Input:
+    list of (request_id, order_id, buyer_email, shipping_address_id,
+             payment_fingerprint, order_total, reason)
+
+Output:
+    list where each entry is either:
+      - (request_id, refund_amount, decision) on success, or
+      - the literal string "ERROR" if the request is missing a required
+        field (request_id, buyer_email, shipping_address_id,
+        payment_fingerprint, or order_total)
+
+Stage 1 policy: DAMAGED -> auto-refund the full order_total; otherwise ->
+manual review with no immediate refund.
+
+Stage 2 policy (readme.md): buyer emails that differ only by casing,
+surrounding whitespace, or dots in the local part are treated as the same
+buyer. Each buyer may receive at most `daily_auto_refund_cap` (default
+$200.00) in auto-refunds across a single `process_return_requests` call
+(one call == one day's worth of requests, per readme.md). Once a buyer's
+cap is reached, requests that would otherwise auto-refund are given as much
+refund as remains under the cap and routed to MANUAL_REVIEW instead;
+further requests past the cap get refund_amount = 0.00.
+
+The per-request base decision (Stage 1) and the cross-request cap
+adjustment (Stage 2) are kept as separate steps so future stages can add or
+swap either independently. Kept separate from ReturnDeskService, which
+models a stateful per-order return workflow against pre-registered Order
+data; this function instead works directly off the order_total carried in
+each raw tuple.
+"""
+
+from decimal import Decimal, InvalidOperation
+from typing import Any, Dict, List, Tuple, Union
+
+from .decisions import REFUND_DECISIONS
+from .exceptions import MissingRequiredFieldError
+from .reasons import RETURN_REASONS
+
+ReturnRequestTuple = Tuple[Any, Any, Any, Any, Any, Any, Any]
+ReturnResultTuple = Tuple[Any, Decimal, str]
+
+# Fields that must be present (non-None, non-blank) for a request to be
+# processed. Note: order_id and reason are intentionally excluded — a
+# missing reason is a valid case (see requirements.txt, section 7).
+REQUIRED_FIELDS = (
+    "request_id",
+    "buyer_email",
+    "shipping_address_id",
+    "payment_fingerprint",
+    "order_total",
+)
+
+_FIELD_NAMES = (
+    "request_id",
+    "order_id",
+    "buyer_email",
+    "shipping_address_id",
+    "payment_fingerprint",
+    "order_total",
+    "reason",
+)
+
+ERROR_RESULT = "ERROR"
+
+# Stage 2: max auto-refund dollars a single (normalized) buyer email may
+# receive within one process_return_requests call ("day").
+DEFAULT_DAILY_AUTO_REFUND_CAP = Decimal("200.00")
+
+
+def process_return_requests(
+    requests: List[ReturnRequestTuple],
+    daily_auto_refund_cap: Decimal = DEFAULT_DAILY_AUTO_REFUND_CAP,
+) -> List[Union[ReturnResultTuple, str]]:
+    """Evaluate a batch of raw return request tuples.
+
+    Requests are processed in order; a running per-buyer auto-refund total
+    is tracked across the batch (Stage 2's daily cap), so request order
+    matters for which requests get capped. A request missing a required
+    field is represented by the literal string "ERROR" at that position
+    instead of a result tuple, and does not affect any buyer's running
+    total.
+    """
+    results: List[Union[ReturnResultTuple, str]] = []
+    auto_refunded_today: Dict[str, Decimal] = {}
+
+    for raw_request in requests:
+        try:
+            fields = _parse(raw_request)
+        except MissingRequiredFieldError:
+            results.append(ERROR_RESULT)
+            continue
+
+        refund_amount, decision = _base_decision(fields)
+        if decision == REFUND_DECISIONS["AUTO_REFUND"]:
+            refund_amount, decision = _apply_daily_cap(
+                buyer_email=fields["buyer_email"],
+                refund_amount=refund_amount,
+                auto_refunded_today=auto_refunded_today,
+                daily_cap=daily_auto_refund_cap,
+            )
+
+        results.append((fields["request_id"], refund_amount, decision))
+
+    return results
+
+
+def _parse(raw_request: ReturnRequestTuple) -> Dict[str, Any]:
+    values = dict(zip(_FIELD_NAMES, raw_request))
+
+    for field_name in REQUIRED_FIELDS:
+        if _is_blank(values.get(field_name)):
+            raise MissingRequiredFieldError(f"'{field_name}' is required but missing.")
+
+    return {
+        "request_id": values["request_id"],
+        "order_id": values.get("order_id"),
+        "buyer_email": normalize_email(values["buyer_email"]),
+        "shipping_address_id": values["shipping_address_id"],
+        "payment_fingerprint": values["payment_fingerprint"],
+        "order_total": _parse_decimal_or_raise(values["order_total"]),
+        "reason": None if _is_blank(values.get("reason")) else values["reason"],
+    }
+
+
+def _base_decision(fields: Dict[str, Any]) -> Tuple[Decimal, str]:
+    """Stage 1 policy, before any cross-request adjustments are applied."""
+    if fields["reason"] == RETURN_REASONS["DAMAGED"]:
+        return fields["order_total"], REFUND_DECISIONS["AUTO_REFUND"]
+    return Decimal("0.00"), REFUND_DECISIONS["MANUAL_REVIEW"]
+
+
+def _apply_daily_cap(
+    buyer_email: str,
+    refund_amount: Decimal,
+    auto_refunded_today: Dict[str, Decimal],
+    daily_cap: Decimal,
+) -> Tuple[Decimal, str]:
+    """Cap a would-be auto-refund against the buyer's remaining daily total.
+
+    Mutates `auto_refunded_today` to record what was actually auto-refunded.
+    """
+    already_refunded = auto_refunded_today.get(buyer_email, Decimal("0.00"))
+    remaining = daily_cap - already_refunded
+
+    if remaining <= Decimal("0.00"):
+        return Decimal("0.00"), REFUND_DECISIONS["MANUAL_REVIEW"]
+
+    if refund_amount <= remaining:
+        auto_refunded_today[buyer_email] = already_refunded + refund_amount
+        return refund_amount, REFUND_DECISIONS["AUTO_REFUND"]
+
+    auto_refunded_today[buyer_email] = daily_cap
+    return remaining, REFUND_DECISIONS["MANUAL_REVIEW"]
+
+
+def normalize_email(raw_email: Any) -> str:
+    """Normalize an email for buyer-identity comparisons (Stage 2).
+
+    Trims whitespace, lowercases, and strips dots from the local part
+    (before the "@") so e.g. "Alice.B@Example.com " and "aliceb@example.com"
+    are treated as the same buyer. The domain is left as-is aside from
+    trimming/lowercasing.
+    """
+    email = str(raw_email).strip().lower()
+    local, separator, domain = email.partition("@")
+    local = local.replace(".", "")
+    return f"{local}{separator}{domain}"
+
+
+def _is_blank(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip() == "":
+        return True
+    return False
+
+
+def _parse_decimal_or_raise(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        raise MissingRequiredFieldError("'order_total' could not be parsed as a decimal.")
+
+================================================================================
+FILE: returns_desk_refund_system/requirements.txt
+================================================================================
+RETURNS DESK REFUND SYSTEM — REQUIREMENTS
+==========================================
+(Design-planning notes distilled from readme.md. Update this file as new
+stages/requirements are introduced.)
+
+1. PURPOSE
+----------
+- Build an extensible library that processes return requests and decides:
+  (a) the refund amount to issue right now (may be 0.00)
+  (b) the decision: AUTO_REFUND or MANUAL_REVIEW
+- Must be designed to evolve — expect new rules, fields, and cross-request
+  logic to be layered on in later stages.
+
+2. INPUT CONTRACT
+------------------
+Each return request is a tuple with these fields (order matters):
+  1. request_id           - unique identifier
+  2. order_id             - unique for this exercise
+  3. buyer_email          - string; may vary by casing/whitespace -> needs normalization
+  4. shipping_address_id  - string; already normalized
+  5. payment_fingerprint  - tokenized string; already normalized
+  6. order_total          - decimal number
+  7. reason               - enum: DAMAGED | NOT_RECEIVED | CHANGED_MIND
+
+Program receives a LIST of these tuples (batch processing, not single-item).
+
+3. OUTPUT CONTRACT
+-------------------
+For each input request, output a tuple:
+  (request_id, refund_amount, decision)
+
+- refund_amount: decimal, 0.00 when not auto-refunding
+- decision: "AUTO_REFUND" or "MANUAL_REVIEW"
+- Output order/count should correspond 1:1 with input requests.
+
+4. STAGE 1 — BASIC REFUND RULE (functional requirements)
+----------------------------------------------------------
+- Each request evaluated independently (no cross-request state yet).
+- Policy:
+    IF reason == "DAMAGED": refund_amount = order_total, decision = AUTO_REFUND
+    ELSE:                   refund_amount = 0.00,        decision = MANUAL_REVIEW
+- Must match sample input/output exactly (see readme.md Stage 1).
+
+5. NON-FUNCTIONAL / DESIGN REQUIREMENTS
+------------------------------------------
+- Extensibility: new reasons, new policies, thresholds, or multi-request
+  (stateful) rules should be addable without rewriting core logic.
+  -> Consider a strategy/rule-based design (e.g. pluggable rule chain,
+     policy objects) rather than a single if/else block.
+- Separation of concerns:
+    - normalization/parsing of raw tuples into a typed model
+    - decision/policy logic
+    - output formatting back into tuples
+- Data handling:
+    - buyer_email should be normalized (trim + lowercase) before any
+      comparison/grouping logic is applied later.
+    - order_total should be treated as a precise decimal (avoid float
+      rounding issues) — likely use Decimal.
+    - reason should be validated against the known enum values.
+- Testability: core decision logic should be unit-testable without I/O.
+- Language: implementer's choice (per parent README); confirm which
+  language/runtime will be used before finalizing structure.
+
+6. OPEN QUESTIONS / UNKNOWNS (to clarify or assume before coding) followed by answers
+---------------------------------------------------------------------
+- What later stages will introduce (readme says "gradually add
+  requirements" — only Stage 1 is currently defined). Anticipate:
+    - Per-buyer / per-payment-fingerprint / per-shipping-address
+      fraud or abuse thresholds (why these fields exist beyond DAMAGED
+      logic is still unclear at Stage 1 — likely used in later stages
+      for cross-request signals, e.g. repeat returns detection).
+    - Reason-specific rules for NOT_RECEIVED and CHANGED_MIND. There can be additional reasons as well. 
+    - Partial refunds (currently only full or 0.00)- yes
+    - Configurable policy thresholds (e.g. dollar limits).
+- Whether MANUAL_REVIEW cases need additional metadata/reasoning attached
+  in later stages.
+
+7. Edge cases
+
+ - if there's no reason indicated for return then it should go for manual MANUAL_REVIEW
+ - if request_id is missing then return "ERROR". 
+ - if buyer_email is missing then return "ERROR". 
+ - if shipping_address_id is missing then return "ERROR". 
+ - if payment_fingerprint is missing then return "ERROR". 
+ - if order_total is missing then return "ERROR". 
+
+
+
+8. SUGGESTED DESIGN SKETCH (for planning)
+---------------------------------------------
+- ReturnRequest (typed model) <- parsed/normalized from raw tuple
+- RefundDecision (typed result) -> serialized to output tuple
+- Rule / Policy interface: evaluate(request, context) -> RefundDecision
+- RuleEngine / DecisionPipeline: runs one or more rules per request,
+  first-match-or-composite depending on how requirements evolve
+- process_return_requests(requests: list[tuple]) -> list[tuple]:
+    entry point that ties parsing -> engine -> formatting together
+
+9. IMPLEMENTATION (what has actually been built, and where)
+-----------------------------------------------------------
+Package: returns_desk_refund_system/ (import as `returns_desk_refund_system`)
+
+There are two parallel surfaces on top of the same shared building blocks:
+
+  A) process_return_requests(requests, daily_auto_refund_cap=200.00)
+     - request_processor.py
+     - Stateless, tuple-in/tuple-out entry point matching readme.md's
+       Stage 1 + Stage 2 contract exactly. No pre-registered Order data
+       needed — order_total is taken directly from each input tuple.
+     - Implements:
+         * Stage 1 policy (DAMAGED -> AUTO_REFUND full order_total; else
+           -> MANUAL_REVIEW, 0.00)
+         * Stage 2 per-buyer daily auto-refund cap (default $200), tracked
+           via a running total across one call ("one call = one day")
+         * Section 7 edge cases: missing reason -> MANUAL_REVIEW; missing
+           request_id / buyer_email / shipping_address_id /
+           payment_fingerprint / order_total -> "ERROR" (literal string,
+           replacing the whole result-list entry) instead of a raising
+     - normalize_email(raw_email): trims + lowercases + strips dots from
+       the local part only (domain untouched), used to group buyers for
+       the daily cap so casing/whitespace/dot variants count as one buyer.
+     - Decision is split into two composable steps so future stages can
+       extend either independently:
+         _base_decision()   -> Stage 1 policy
+         _apply_daily_cap() -> Stage 2 adjustment (only when Stage 1
+                                would auto-refund)
+
+  B) ReturnDeskService (stateful, order-aware workflow)
+     - service.py
+     - Models a Returns Desk that already knows about orders (with
+       line-item detail), and a return moving through a status lifecycle,
+       rather than a single-shot batch of flat tuples.
+     - __init__(self, orders: dict[str, Order], decision_engine=None)
+     - submit_return(order_id, items, reason, actor="customer")
+         -> validates order exists, reason is a known enum value, and
+            requested items/quantities are part of the order and not
+            already claimed by another non-rejected return; creates a
+            ReturnRequest in REQUESTED status.
+     - evaluate_return(return_id) -> RefundDecision
+         -> runs the request through RefundDecisionEngine (refund_policy.py)
+            and caches the result on the ReturnRequest.
+     - Only submit_return + evaluate_return exist today; approve/receive/
+       refund/reject/close transitions are not yet implemented (see
+       status.VALID_TRANSITIONS, already defined for when they are).
+
+Shared building blocks (used by both A and B where applicable):
+  - reasons.py      RETURN_REASONS = {DAMAGED, NOT_RECEIVED, CHANGED_MIND}
+  - decisions.py    REFUND_DECISIONS = {AUTO_REFUND, MANUAL_REVIEW}
+  - status.py        RETURN_STATUSES + VALID_TRANSITIONS (B only, for now)
+  - models.py        Order, OrderItem, ReturnRequest, ReturnLineItem,
+                      RefundDecision
+  - exceptions.py    ReturnDeskError and subclasses (OrderNotFoundError,
+                      InvalidReturnItemsError, InvalidReturnReasonError,
+                      ReturnNotFoundError, InvalidStatusTransitionError,
+                      MissingRequiredFieldError)
+  - refund_policy.py RefundRule (ABC) / DamagedItemsAutoRefundRule /
+                      DefaultManualReviewRule / RefundDecisionEngine
+                      (used by ReturnDeskService.evaluate_return; the raw
+                      tuple flow in request_processor.py currently
+                      re-implements the equivalent Stage 1 check inline
+                      since it works off order_total rather than
+                      line-item unit prices — worth revisiting if the two
+                      surfaces need to share one policy implementation)
+
+Known gap: request_processor.py's per-request policy and
+refund_policy.py's RefundDecisionEngine are two separate implementations
+of "the same" Stage 1 rule (one keyed on order_total, one on order line
+items). If a future stage needs identical policy behavior in both
+surfaces, consider unifying them behind one shared rule interface.
+
+10. TESTS
+---------
+Location: returns_desk_refund_system/tests/ (pytest, uses fixtures +
+@pytest.mark.parametrize)
+
+  - test_request_processor.py  process_return_requests + normalize_email
+      * Stage 1 sample from readme.md (exact input/output)
+      * Stage 2 sample from readme.md (exact input/output, $200 cap)
+      * decision-by-reason matrix (DAMAGED/NOT_RECEIVED/CHANGED_MIND/
+        missing/blank/unrecognized reason)
+      * missing-required-field -> "ERROR" matrix (all 5 required fields)
+      * daily cap: under cap, exact boundary, over cap (partial refund),
+        cap already exhausted, cap tracked per normalized buyer (dots/
+        casing/whitespace), cap independent across buyers, non-auto-
+        refund requests don't consume the cap, "ERROR" requests don't
+        consume the cap, custom cap value
+      * data handling: email normalization, Decimal precision, empty
+        batch, non-numeric order_total -> "ERROR"
+  - test_service.py            ReturnDeskService.submit_return +
+                                evaluate_return
+      * submit success cases (dict item, bare item id, custom actor,
+        ReturnLineItem instance)
+      * validation error matrix (unknown order, invalid reason, item not
+        in order, empty items, non-positive/over-limit quantity)
+      * stateful in-flight quantity tracking + rejection freeing quantity
+      * evaluate_return decision matrix by reason, unknown return_id
+  - test_refund_policy.py      RefundDecisionEngine
+      * defensive fallback to MANUAL_REVIEW when no rule matches
+
+Run: `python3 -m pytest returns_desk_refund_system/tests/ -v`
+Coverage: `python3 -m pytest returns_desk_refund_system/tests/ --cov=returns_desk_refund_system --cov-report=term-missing`
+Last measured: 54 tests passing, 99% line coverage across the package
+(the only uncovered line is an abstract method body that is always
+overridden, in refund_policy.py).
+
+================================================================================
+FILE: returns_desk_refund_system/service.py
+================================================================================
+"""ReturnDeskService: coordinates the lifecycle of return requests against a
+known set of orders.
+
+Covers: submitting a return, and deciding whether it should be auto-refunded
+or sent to manual review. Approve/receive/refund/reject/close status
+transitions are expected to be added next, reusing status.VALID_TRANSITIONS
+to enforce legal moves.
+"""
+
+import itertools
+from typing import Any, Dict, Iterable, List, Optional, Union
+
+from .exceptions import (
+    InvalidReturnItemsError,
+    InvalidReturnReasonError,
+    OrderNotFoundError,
+    ReturnNotFoundError,
+)
+from .models import Order, RefundDecision, ReturnLineItem, ReturnRequest
+from .reasons import RETURN_REASONS
+from .refund_policy import RefundDecisionEngine
+from .status import RETURN_STATUSES
+
+# A caller may describe an item to return as:
+#   - a bare item_id string (implies quantity=1)
+#   - a dict like {"item_id": ..., "quantity": ...}
+#   - an already-built ReturnLineItem
+ReturnItemInput = Union[str, Dict[str, Any], ReturnLineItem]
+
+
+class ReturnDeskService:
+    """Coordinates return requests submitted against a set of known orders."""
+
+    def __init__(
+        self,
+        orders: Dict[str, Order],
+        decision_engine: Optional[RefundDecisionEngine] = None,
+    ):
+        self._orders: Dict[str, Order] = orders
+        self._returns: Dict[str, ReturnRequest] = {}
+        self._id_counter = itertools.count(1)
+        self._decision_engine = decision_engine or RefundDecisionEngine()
+
+    def submit_return(
+        self,
+        order_id: str,
+        items: Iterable[ReturnItemInput],
+        reason: str,
+        actor: str = "customer",
+    ) -> ReturnRequest:
+        """A customer (or other actor) submits a return request.
+
+        Validates that the order exists, the reason is recognized, and every
+        requested item is part of the order and available to return (i.e.
+        hasn't already been fully claimed by another non-rejected return).
+        On success, creates and stores a new ReturnRequest in REQUESTED
+        status.
+        """
+        order = self._get_order_or_raise(order_id)
+        self._validate_reason_or_raise(reason)
+        line_items = self._validate_items_or_raise(order, items)
+
+        return_request = ReturnRequest(
+            return_id=self._generate_return_id(order_id),
+            order_id=order_id,
+            items=line_items,
+            actor=actor,
+            status=RETURN_STATUSES["REQUESTED"],
+            reason=reason,
+        )
+        return_request.history.append({"status": return_request.status, "actor": actor})
+        self._returns[return_request.return_id] = return_request
+        return return_request
+
+    def evaluate_return(self, return_id: str) -> RefundDecision:
+        """Decide whether a return should be auto-refunded now or sent to
+        manual review, per the refund policy (see refund_policy.py).
+
+        The resulting RefundDecision is cached on the ReturnRequest (so
+        repeated calls / later status transitions can reuse it) and
+        returned to the caller.
+        """
+        return_request = self._get_return_or_raise(return_id)
+        order = self._get_order_or_raise(return_request.order_id)
+
+        decision = self._decision_engine.decide(return_request, order)
+        return_request.decision = decision
+        return decision
+
+    def get_return(self, return_id: str) -> Optional[ReturnRequest]:
+        return self._returns.get(return_id)
+
+    def _get_order_or_raise(self, order_id: str) -> Order:
+        order = self._orders.get(order_id)
+        if order is None:
+            raise OrderNotFoundError(f"Order '{order_id}' does not exist.")
+        return order
+
+    def _get_return_or_raise(self, return_id: str) -> ReturnRequest:
+        return_request = self._returns.get(return_id)
+        if return_request is None:
+            raise ReturnNotFoundError(f"Return '{return_id}' does not exist.")
+        return return_request
+
+    @staticmethod
+    def _validate_reason_or_raise(reason: str) -> None:
+        if reason not in RETURN_REASONS.values():
+            valid = ", ".join(sorted(RETURN_REASONS.values()))
+            raise InvalidReturnReasonError(
+                f"Reason '{reason}' is not recognized. Valid reasons: {valid}."
+            )
+
+    def _validate_items_or_raise(
+        self, order: Order, items: Iterable[ReturnItemInput]
+    ) -> List[ReturnLineItem]:
+        items = list(items)
+        if not items:
+            raise InvalidReturnItemsError("At least one item must be specified for a return.")
+
+        already_requested = self._quantity_already_in_flight(order.order_id)
+        line_items: List[ReturnLineItem] = []
+        for raw_item in items:
+            item_id, quantity = self._parse_item(raw_item)
+
+            order_item = order.find_item(item_id)
+            if order_item is None:
+                raise InvalidReturnItemsError(
+                    f"Item '{item_id}' is not part of order '{order.order_id}'."
+                )
+            if quantity <= 0:
+                raise InvalidReturnItemsError(
+                    f"Return quantity for item '{item_id}' must be positive."
+                )
+
+            remaining = order_item.quantity - already_requested.get(item_id, 0)
+            if quantity > remaining:
+                raise InvalidReturnItemsError(
+                    f"Cannot return {quantity} of item '{item_id}'; only {remaining} remaining."
+                )
+
+            line_items.append(ReturnLineItem(item_id=item_id, quantity=quantity))
+            already_requested[item_id] = already_requested.get(item_id, 0) + quantity
+
+        return line_items
+
+    @staticmethod
+    def _parse_item(raw_item: ReturnItemInput) -> (str, int):
+        if isinstance(raw_item, ReturnLineItem):
+            return raw_item.item_id, raw_item.quantity
+        if isinstance(raw_item, dict):
+            return raw_item["item_id"], raw_item.get("quantity", 1)
+        return raw_item, 1  # bare item_id string
+
+    def _quantity_already_in_flight(self, order_id: str) -> Dict[str, int]:
+        """Sum quantities already requested for this order across returns
+        that haven't been rejected (a rejected return frees the item back up)."""
+        totals: Dict[str, int] = {}
+        for existing in self._returns.values():
+            if existing.order_id != order_id or existing.status == RETURN_STATUSES["REJECTED"]:
+                continue
+            for line_item in existing.items:
+                totals[line_item.item_id] = totals.get(line_item.item_id, 0) + line_item.quantity
+        return totals
+
+    def _generate_return_id(self, order_id: str) -> str:
+        return f"ret_{order_id}_{next(self._id_counter)}"
+
+================================================================================
+FILE: returns_desk_refund_system/status.py
+================================================================================
+"""Return status vocabulary and the state machine describing valid transitions.
+
+Kept as a plain dict (rather than an enum) so it's trivial to inspect/serialize
+and to extend with new statuses as the Returns Desk grows.
+"""
+
+RETURN_STATUSES = {
+    "REQUESTED": "requested",
+    "APPROVED": "approved",
+    "RECEIVED": "received",
+    "REFUNDED": "refunded",
+    "REJECTED": "rejected",
+    "CLOSED": "closed",
+}
+
+# Which statuses a return may move to next, from a given status.
+VALID_TRANSITIONS = {
+    RETURN_STATUSES["REQUESTED"]: {RETURN_STATUSES["APPROVED"], RETURN_STATUSES["REJECTED"]},
+    RETURN_STATUSES["APPROVED"]: {RETURN_STATUSES["RECEIVED"], RETURN_STATUSES["REJECTED"]},
+    RETURN_STATUSES["RECEIVED"]: {RETURN_STATUSES["REFUNDED"], RETURN_STATUSES["REJECTED"]},
+    RETURN_STATUSES["REFUNDED"]: {RETURN_STATUSES["CLOSED"]},
+    RETURN_STATUSES["REJECTED"]: {RETURN_STATUSES["CLOSED"]},
+    RETURN_STATUSES["CLOSED"]: set(),
+}
+
+================================================================================
+FILE: returns_desk_refund_system/tests/__init__.py
+================================================================================
+
+================================================================================
+FILE: returns_desk_refund_system/tests/test_refund_policy.py
+================================================================================
+from decimal import Decimal
+
+from returns_desk_refund_system import (
+    Order,
+    OrderItem,
+    RETURN_REASONS,
+    RefundDecisionEngine,
+    ReturnLineItem,
+    ReturnRequest,
+)
+
+
+def make_order() -> Order:
+    return Order(
+        order_id="o100",
+        buyer_email="alice@example.com",
+        items=[OrderItem(item_id="item_1", sku="SKU-1", quantity=1, unit_price=Decimal("20.00"))],
+    )
+
+
+def make_return_request(reason: str) -> ReturnRequest:
+    return ReturnRequest(
+        return_id="ret_1",
+        order_id="o100",
+        items=[ReturnLineItem(item_id="item_1", quantity=1)],
+        actor="customer",
+        status="requested",
+        reason=reason,
+    )
+
+
+class TestRefundDecisionEngine:
+    def test_engine_with_no_rules_defaults_to_manual_review(self):
+        engine = RefundDecisionEngine(rules=[])
+        order = make_order()
+        return_request = make_return_request(RETURN_REASONS["DAMAGED"])
+
+        decision = engine.decide(return_request, order)
+
+        assert decision.decision == "MANUAL_REVIEW"
+        assert decision.refund_amount == Decimal("0.00")
+
+================================================================================
+FILE: returns_desk_refund_system/tests/test_request_processor.py
+================================================================================
+from decimal import Decimal
+
+import pytest
+
+from returns_desk_refund_system import (
+    ERROR_RESULT,
+    normalize_email,
+    process_return_requests,
+)
+
+
+class TestProcessReturnRequestsStage1Sample:
+    """Locks in the exact Stage 1 sample from readme.md."""
+
+    def test_readme_sample_input_output(self):
+        requests = [
+            ("r1", "o100", "Alice@Example.com ", "addr_1", "card_A", 120.00, "DAMAGED"),
+            ("r2", "o101", "bob@example.com", "addr_2", "card_B", 80.00, "CHANGED_MIND"),
+            ("r3", "o102", "cathy@example.com", "addr_3", "card_C", 35.50, "DAMAGED"),
+        ]
+
+        results = process_return_requests(requests)
+
+        assert results == [
+            ("r1", Decimal("120.00"), "AUTO_REFUND"),
+            ("r2", Decimal("0.00"), "MANUAL_REVIEW"),
+            ("r3", Decimal("35.50"), "AUTO_REFUND"),
+        ]
+
+
+class TestProcessReturnRequestsDecisionByReason:
+    """Covers requirements.txt section 4 (Stage 1 policy) and section 7
+    (missing reason -> MANUAL_REVIEW)."""
+
+    @pytest.mark.parametrize(
+        "reason, expected_amount, expected_decision",
+        [
+            ("DAMAGED", Decimal("50.00"), "AUTO_REFUND"),
+            ("NOT_RECEIVED", Decimal("0.00"), "MANUAL_REVIEW"),
+            ("CHANGED_MIND", Decimal("0.00"), "MANUAL_REVIEW"),
+            (None, Decimal("0.00"), "MANUAL_REVIEW"),
+            ("", Decimal("0.00"), "MANUAL_REVIEW"),
+            ("SOME_UNKNOWN_REASON", Decimal("0.00"), "MANUAL_REVIEW"),
+        ],
+        ids=[
+            "damaged-auto-refund",
+            "not-received-manual-review",
+            "changed-mind-manual-review",
+            "reason-none-manual-review",
+            "reason-blank-manual-review",
+            "unrecognized-reason-manual-review",
+        ],
+    )
+    def test_decision_by_reason(self, reason, expected_amount, expected_decision):
+        requests = [("r1", "o100", "alice@example.com", "addr_1", "card_A", 50.00, reason)]
+
+        [result] = process_return_requests(requests)
+
+        assert result == ("r1", expected_amount, expected_decision)
+
+
+class TestProcessReturnRequestsMissingRequiredFields:
+    """Covers requirements.txt section 7 (Edge cases) — missing required
+    fields produce the literal string "ERROR" at that position."""
+
+    @pytest.mark.parametrize(
+        "request_id, buyer_email, shipping_address_id, payment_fingerprint, order_total",
+        [
+            (None, "alice@example.com", "addr_1", "card_A", 50.00),
+            ("r1", None, "addr_1", "card_A", 50.00),
+            ("r1", "alice@example.com", None, "card_A", 50.00),
+            ("r1", "alice@example.com", "addr_1", None, 50.00),
+            ("r1", "alice@example.com", "addr_1", "card_A", None),
+            ("", "alice@example.com", "addr_1", "card_A", 50.00),
+            ("r1", "  ", "addr_1", "card_A", 50.00),
+        ],
+        ids=[
+            "missing-request-id",
+            "missing-buyer-email",
+            "missing-shipping-address-id",
+            "missing-payment-fingerprint",
+            "missing-order-total",
+            "blank-request-id",
+            "blank-buyer-email",
+        ],
+    )
+    def test_missing_required_field_returns_error(
+        self, request_id, buyer_email, shipping_address_id, payment_fingerprint, order_total
+    ):
+        requests = [
+            (
+                request_id,
+                "o100",
+                buyer_email,
+                shipping_address_id,
+                payment_fingerprint,
+                order_total,
+                "DAMAGED",
+            )
+        ]
+
+        results = process_return_requests(requests)
+
+        assert results == [ERROR_RESULT]
+
+    def test_batch_preserves_order_and_count_with_mixed_valid_and_error_requests(self):
+        requests = [
+            ("r1", "o100", "alice@example.com", "addr_1", "card_A", 120.00, "DAMAGED"),
+            (None, "o101", "bob@example.com", "addr_2", "card_B", 80.00, "CHANGED_MIND"),
+            ("r3", "o102", "cathy@example.com", "addr_3", "card_C", 35.50, "DAMAGED"),
+        ]
+
+        results = process_return_requests(requests)
+
+        assert results == [
+            ("r1", Decimal("120.00"), "AUTO_REFUND"),
+            ERROR_RESULT,
+            ("r3", Decimal("35.50"), "AUTO_REFUND"),
+        ]
+
+
+class TestProcessReturnRequestsDataHandling:
+    """Covers requirements.txt section 5 (Data handling)."""
+
+    def test_buyer_email_casing_and_whitespace_does_not_affect_outcome(self):
+        requests = [("r1", "o100", " Alice@Example.com ", "addr_1", "card_A", 10.00, "DAMAGED")]
+
+        [result] = process_return_requests(requests)
+
+        assert result == ("r1", Decimal("10.00"), "AUTO_REFUND")
+
+    def test_order_total_is_treated_as_precise_decimal(self):
+        requests = [("r1", "o100", "alice@example.com", "addr_1", "card_A", "35.50", "DAMAGED")]
+
+        [result] = process_return_requests(requests)
+
+        assert result[1] == Decimal("35.50")
+        assert isinstance(result[1], Decimal)
+
+    def test_empty_batch_returns_empty_list(self):
+        assert process_return_requests([]) == []
+
+    def test_non_numeric_order_total_returns_error(self):
+        requests = [
+            ("r1", "o100", "alice@example.com", "addr_1", "card_A", "not-a-number", "DAMAGED")
+        ]
+
+        results = process_return_requests(requests)
+
+        assert results == [ERROR_RESULT]
+
+
+class TestNormalizeEmail:
+    """Covers request_processor.normalize_email (Stage 2)."""
+
+    @pytest.mark.parametrize(
+        "raw_email, expected",
+        [
+            ("alice@example.com", "alice@example.com"),
+            ("Alice@Example.com", "alice@example.com"),
+            (" alice@example.com ", "alice@example.com"),
+            ("alice.b@example.com", "aliceb@example.com"),
+            ("Al.ice.B@Example.com ", "aliceb@example.com"),
+            ("a.l.i.c.e@example.com", "alice@example.com"),
+        ],
+        ids=[
+            "already-normalized",
+            "casing",
+            "whitespace",
+            "dots-in-local-part",
+            "casing-whitespace-and-dots-combined",
+            "many-dots",
+        ],
+    )
+    def test_normalize_email(self, raw_email, expected):
+        assert normalize_email(raw_email) == expected
+
+    def test_normalize_email_does_not_strip_dots_from_domain(self):
+        assert normalize_email("Alice@Sub.Example.com") == "alice@sub.example.com"
+
+
+class TestProcessReturnRequestsStage2Sample:
+    """Locks in the exact Stage 2 sample from readme.md (daily cap = $200)."""
+
+    def test_readme_stage_2_sample(self):
+        requests = [
+            ("r1", "o200", "Alice@Example.com ", "addr_1", "card_A", 120.00, "DAMAGED"),
+            ("r2", "o201", "alice@example.com", "addr_4", "card_D", 90.00, "DAMAGED"),
+            ("r3", "o202", "alice@example.com", "addr_5", "card_E", 50.00, "DAMAGED"),
+        ]
+
+        results = process_return_requests(requests)
+
+        assert results == [
+            ("r1", Decimal("120.00"), "AUTO_REFUND"),
+            ("r2", Decimal("80.00"), "MANUAL_REVIEW"),
+            ("r3", Decimal("0.00"), "MANUAL_REVIEW"),
+        ]
+
+
+class TestProcessReturnRequestsDailyCap:
+    """Covers requirements.txt / readme.md Stage 2 — per-buyer daily
+    auto-refund cap."""
+
+    def test_requests_under_cap_are_all_auto_refunded(self):
+        requests = [
+            ("r1", "o100", "alice@example.com", "addr_1", "card_A", 50.00, "DAMAGED"),
+            ("r2", "o101", "alice@example.com", "addr_2", "card_B", 50.00, "DAMAGED"),
+        ]
+
+        results = process_return_requests(requests)
+
+        assert results == [
+            ("r1", Decimal("50.00"), "AUTO_REFUND"),
+            ("r2", Decimal("50.00"), "AUTO_REFUND"),
+        ]
+
+    def test_request_exactly_at_cap_boundary_is_fully_auto_refunded(self):
+        requests = [
+            ("r1", "o100", "alice@example.com", "addr_1", "card_A", 200.00, "DAMAGED"),
+        ]
+
+        [result] = process_return_requests(requests)
+
+        assert result == ("r1", Decimal("200.00"), "AUTO_REFUND")
+
+    def test_request_exceeding_cap_refunds_remaining_amount_and_flags_review(self):
+        requests = [
+            ("r1", "o100", "alice@example.com", "addr_1", "card_A", 150.00, "DAMAGED"),
+            ("r2", "o101", "alice@example.com", "addr_2", "card_B", 100.00, "DAMAGED"),
+        ]
+
+        results = process_return_requests(requests)
+
+        assert results == [
+            ("r1", Decimal("150.00"), "AUTO_REFUND"),
+            ("r2", Decimal("50.00"), "MANUAL_REVIEW"),
+        ]
+
+    def test_request_after_cap_fully_reached_gets_zero_refund(self):
+        requests = [
+            ("r1", "o100", "alice@example.com", "addr_1", "card_A", 200.00, "DAMAGED"),
+            ("r2", "o101", "alice@example.com", "addr_2", "card_B", 10.00, "DAMAGED"),
+        ]
+
+        results = process_return_requests(requests)
+
+        assert results == [
+            ("r1", Decimal("200.00"), "AUTO_REFUND"),
+            ("r2", Decimal("0.00"), "MANUAL_REVIEW"),
+        ]
+
+    def test_cap_is_tracked_per_normalized_buyer_not_raw_email(self):
+        requests = [
+            ("r1", "o100", "Alice.B@Example.com", "addr_1", "card_A", 150.00, "DAMAGED"),
+            ("r2", "o101", " aliceb@example.com ", "addr_2", "card_B", 100.00, "DAMAGED"),
+        ]
+
+        results = process_return_requests(requests)
+
+        assert results == [
+            ("r1", Decimal("150.00"), "AUTO_REFUND"),
+            ("r2", Decimal("50.00"), "MANUAL_REVIEW"),
+        ]
+
+    def test_cap_is_independent_per_buyer(self):
+        requests = [
+            ("r1", "o100", "alice@example.com", "addr_1", "card_A", 200.00, "DAMAGED"),
+            ("r2", "o101", "bob@example.com", "addr_2", "card_B", 200.00, "DAMAGED"),
+        ]
+
+        results = process_return_requests(requests)
+
+        assert results == [
+            ("r1", Decimal("200.00"), "AUTO_REFUND"),
+            ("r2", Decimal("200.00"), "AUTO_REFUND"),
+        ]
+
+    def test_manual_review_requests_do_not_consume_the_cap(self):
+        requests = [
+            ("r1", "o100", "alice@example.com", "addr_1", "card_A", 300.00, "CHANGED_MIND"),
+            ("r2", "o101", "alice@example.com", "addr_2", "card_B", 200.00, "DAMAGED"),
+        ]
+
+        results = process_return_requests(requests)
+
+        assert results == [
+            ("r1", Decimal("0.00"), "MANUAL_REVIEW"),
+            ("r2", Decimal("200.00"), "AUTO_REFUND"),
+        ]
+
+    def test_request_missing_a_required_field_does_not_consume_the_cap(self):
+        requests = [
+            (None, "o100", "alice@example.com", "addr_1", "card_A", 150.00, "DAMAGED"),
+            ("r2", "o101", "alice@example.com", "addr_2", "card_B", 150.00, "DAMAGED"),
+        ]
+
+        results = process_return_requests(requests)
+
+        assert results == [
+            ERROR_RESULT,
+            ("r2", Decimal("150.00"), "AUTO_REFUND"),
+        ]
+
+    def test_custom_daily_auto_refund_cap(self):
+        requests = [
+            ("r1", "o100", "alice@example.com", "addr_1", "card_A", 60.00, "DAMAGED"),
+            ("r2", "o101", "alice@example.com", "addr_2", "card_B", 60.00, "DAMAGED"),
+        ]
+
+        results = process_return_requests(requests, daily_auto_refund_cap=Decimal("100.00"))
+
+        assert results == [
+            ("r1", Decimal("60.00"), "AUTO_REFUND"),
+            ("r2", Decimal("40.00"), "MANUAL_REVIEW"),
+        ]
+
+================================================================================
+FILE: returns_desk_refund_system/tests/test_service.py
+================================================================================
+from decimal import Decimal
+
+import pytest
+
+from returns_desk_refund_system import (
+    InvalidReturnItemsError,
+    InvalidReturnReasonError,
+    Order,
+    OrderItem,
+    OrderNotFoundError,
+    RETURN_REASONS,
+    RETURN_STATUSES,
+    RefundDecisionEngine,
+    ReturnDeskService,
+    ReturnLineItem,
+    ReturnNotFoundError,
+)
+
+
+@pytest.fixture
+def order() -> Order:
+    return Order(
+        order_id="o100",
+        buyer_email="alice@example.com",
+        items=[
+            OrderItem(item_id="item_1", sku="SKU-1", quantity=2, unit_price=Decimal("20.00")),
+            OrderItem(item_id="item_2", sku="SKU-2", quantity=1, unit_price=Decimal("15.00")),
+        ],
+    )
+
+
+@pytest.fixture
+def service(order) -> ReturnDeskService:
+    return ReturnDeskService(orders={order.order_id: order})
+
+
+class TestSubmitReturn:
+    """Covers ReturnDeskService.submit_return."""
+
+    @pytest.mark.parametrize(
+        "items, reason, actor, expected_quantity",
+        [
+            ([{"item_id": "item_1", "quantity": 1}], RETURN_REASONS["DAMAGED"], "customer", 1),
+            (["item_2"], RETURN_REASONS["CHANGED_MIND"], "customer", 1),
+            (["item_1"], RETURN_REASONS["DAMAGED"], "support_agent", 1),
+            (
+                [ReturnLineItem(item_id="item_1", quantity=2)],
+                RETURN_REASONS["DAMAGED"],
+                "customer",
+                2,
+            ),
+        ],
+        ids=[
+            "dict-item-damaged",
+            "bare-item-id-default-quantity",
+            "custom-actor",
+            "return-line-item-instance",
+        ],
+    )
+    def test_submit_return_success(self, service, items, reason, actor, expected_quantity):
+        result = service.submit_return(order_id="o100", items=items, reason=reason, actor=actor)
+
+        assert result.status == RETURN_STATUSES["REQUESTED"]
+        assert result.order_id == "o100"
+        assert result.reason == reason
+        assert result.actor == actor
+        assert result.decision is None
+        assert result.items[0].quantity == expected_quantity
+        assert service.get_return(result.return_id) is result
+
+    @pytest.mark.parametrize(
+        "order_id, items, reason, expected_exception",
+        [
+            ("does_not_exist", ["item_1"], RETURN_REASONS["DAMAGED"], OrderNotFoundError),
+            ("o100", ["item_1"], "NOT_A_REASON", InvalidReturnReasonError),
+            ("o100", ["not_in_order"], RETURN_REASONS["DAMAGED"], InvalidReturnItemsError),
+            ("o100", [], RETURN_REASONS["DAMAGED"], InvalidReturnItemsError),
+            (
+                "o100",
+                [{"item_id": "item_1", "quantity": 0}],
+                RETURN_REASONS["DAMAGED"],
+                InvalidReturnItemsError,
+            ),
+            (
+                "o100",
+                [{"item_id": "item_1", "quantity": 3}],
+                RETURN_REASONS["DAMAGED"],
+                InvalidReturnItemsError,
+            ),
+        ],
+        ids=[
+            "unknown-order",
+            "invalid-reason",
+            "item-not-in-order",
+            "empty-items",
+            "non-positive-quantity",
+            "exceeds-purchased-quantity",
+        ],
+    )
+    def test_submit_return_validation_errors(
+        self, service, order_id, items, reason, expected_exception
+    ):
+        with pytest.raises(expected_exception):
+            service.submit_return(order_id=order_id, items=items, reason=reason)
+
+    def test_second_return_respects_quantity_already_in_flight(self, service):
+        service.submit_return(
+            order_id="o100",
+            items=[{"item_id": "item_1", "quantity": 2}],
+            reason=RETURN_REASONS["DAMAGED"],
+        )
+
+        with pytest.raises(InvalidReturnItemsError):
+            service.submit_return(
+                order_id="o100",
+                items=[{"item_id": "item_1", "quantity": 1}],
+                reason=RETURN_REASONS["DAMAGED"],
+            )
+
+    def test_rejected_return_frees_up_item_for_resubmission(self, service):
+        first = service.submit_return(
+            order_id="o100",
+            items=[{"item_id": "item_1", "quantity": 2}],
+            reason=RETURN_REASONS["DAMAGED"],
+        )
+        first.status = RETURN_STATUSES["REJECTED"]
+
+        second = service.submit_return(
+            order_id="o100",
+            items=[{"item_id": "item_1", "quantity": 2}],
+            reason=RETURN_REASONS["DAMAGED"],
+        )
+        assert second.items[0].quantity == 2
+
+
+class TestEvaluateReturn:
+    """Covers ReturnDeskService.evaluate_return."""
+
+    @pytest.mark.parametrize(
+        "items, reason, expected_decision, expected_amount",
+        [
+            (
+                [{"item_id": "item_1", "quantity": 1}],
+                RETURN_REASONS["DAMAGED"],
+                "AUTO_REFUND",
+                Decimal("20.00"),
+            ),
+            (
+                [{"item_id": "item_1", "quantity": 2}, {"item_id": "item_2", "quantity": 1}],
+                RETURN_REASONS["DAMAGED"],
+                "AUTO_REFUND",
+                Decimal("55.00"),
+            ),
+            (
+                [{"item_id": "item_1", "quantity": 1}],
+                RETURN_REASONS["CHANGED_MIND"],
+                "MANUAL_REVIEW",
+                Decimal("0.00"),
+            ),
+            (
+                [{"item_id": "item_2", "quantity": 1}],
+                RETURN_REASONS["NOT_RECEIVED"],
+                "MANUAL_REVIEW",
+                Decimal("0.00"),
+            ),
+        ],
+        ids=[
+            "damaged-single-item-auto-refund",
+            "damaged-multiple-items-sums-value",
+            "changed-mind-manual-review",
+            "not-received-manual-review",
+        ],
+    )
+    def test_evaluate_return_decision(
+        self, service, items, reason, expected_decision, expected_amount
+    ):
+        return_request = service.submit_return(order_id="o100", items=items, reason=reason)
+
+        decision = service.evaluate_return(return_request.return_id)
+
+        assert decision.decision == expected_decision
+        assert decision.refund_amount == expected_amount
+        assert return_request.decision is decision
+
+    def test_evaluate_return_raises_for_unknown_return_id(self, service):
+        with pytest.raises(ReturnNotFoundError):
+            service.evaluate_return("does_not_exist")
